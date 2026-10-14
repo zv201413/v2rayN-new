@@ -1,0 +1,12 @@
+bin/
+obj/
+*.deb
+*.tar.gz
+publish/
+probe-out/
+stage/
+test-root/
+upstream-src/
+sha256sums.txt
+__pycache__/
+*.pyc

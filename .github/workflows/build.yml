@@ -1,0 +1,148 @@
+name: Build and Release v2rayN with Pin Patch
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Upstream tag from 2dust/v2rayN (e.g. 7.25.6)'
+        required: true
+        default: '7.25.6'
+      patch_rev:
+        description: 'Patch revision suffix (e.g. +zvpin1)'
+        required: true
+        default: '+zvpin1'
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine versions
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.upstream_tag }}"
+            REV="${{ github.event.inputs.patch_rev }}"
+          else
+            RAW_TAG="${GITHUB_REF#refs/tags/v}"
+            TAG="${RAW_TAG%%+*}"
+            if [[ "$RAW_TAG" == *+* ]]; then
+              REV="+${RAW_TAG#*+}"
+            else
+              REV="+zvpin1"
+            fi
+          fi
+          FULL_VER="${TAG}${REV}"
+          RELEASE_TAG="v${FULL_VER}"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "rev=${REV}" >> $GITHUB_OUTPUT
+          echo "full_ver=${FULL_VER}" >> $GITHUB_OUTPUT
+          echo "release_tag=${RELEASE_TAG}" >> $GITHUB_OUTPUT
+          echo "Building upstream tag: ${TAG}, full package version: ${FULL_VER}, release: ${RELEASE_TAG}"
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Clone upstream v2rayN
+        run: |
+          TAG="${{ steps.vars.outputs.tag }}"
+          echo "Cloning 2dust/v2rayN tag: ${TAG}..."
+          git clone --depth 1 --branch "${TAG}" --recurse-submodules https://github.com/2dust/v2rayN.git upstream-src
+
+      - name: Apply TLS pin patch
+        run: |
+          echo "Applying TLS pin patch..."
+          python3 patches/apply-pin.py upstream-src/v2rayN
+          echo "Verifying patch marker in ServiceLib..."
+          grep -rq 'certificate_public_key_sha256' upstream-src/v2rayN/ServiceLib
+
+      - name: Build v2rayN Desktop & AmazTool
+        run: |
+          mkdir -p publish
+          cd upstream-src/v2rayN
+          echo "Publishing v2rayN.Desktop..."
+          dotnet publish v2rayN.Desktop/v2rayN.Desktop.csproj \
+            -c Release -r linux-x64 -p:SelfContained=true -p:PublishSingleFile=false --nologo -o ../../publish
+          echo "Publishing AmazTool..."
+          dotnet publish AmazTool/AmazTool.csproj \
+            -c Release -r linux-x64 -p:SelfContained=true -p:PublishSingleFile=false --nologo -o ../../publish
+          cd ../..
+          echo "Verifying ServiceLib.dll contains pin marker..."
+          strings -a publish/ServiceLib.dll | grep -q 'certificate_public_key_sha256'
+          echo "Publish completed successfully."
+
+      - name: Build ClientProbe (Self-Contained)
+        run: |
+          mkdir -p probe-out
+          dotnet publish tests/ClientProbe/ClientProbe.csproj \
+            -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -p:ClientDir="$PWD/publish" --nologo -o probe-out
+          chmod +x probe-out/ClientProbe
+          tar -czf client-probe-linux-x64.tar.gz -C probe-out ClientProbe
+          echo "ClientProbe built and packaged."
+
+      - name: Download official deb & assemble patched deb
+        run: |
+          TAG="${{ steps.vars.outputs.tag }}"
+          FULL_VER="${{ steps.vars.outputs.full_ver }}"
+          DEB_NAME="v2rayN-linux-64.deb"
+          OFFICIAL_URL="https://github.com/2dust/v2rayN/releases/download/${TAG}/${DEB_NAME}"
+          echo "Downloading official deb from ${OFFICIAL_URL}..."
+          curl -sSL -f -o "${DEB_NAME}" "${OFFICIAL_URL}" || {
+            echo "Failed to download official deb from ${OFFICIAL_URL}"
+            exit 1
+          }
+          OUTPUT_DEB="v2rayn_${FULL_VER}_amd64.deb"
+          python3 packaging/stage_cloud.py publish "${DEB_NAME}" stage "${OUTPUT_DEB}" "${FULL_VER}"
+          sha256sum "${OUTPUT_DEB}" client-probe-linux-x64.tar.gz > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: Self-test with sing-box in Actions
+        run: |
+          FULL_VER="${{ steps.vars.outputs.full_ver }}"
+          DEB="v2rayn_${FULL_VER}_amd64.deb"
+          echo "Extracting deb for smoke test..."
+          dpkg-deb -x "${DEB}" test-root
+          chmod +x test-root/opt/v2rayN/bin/sing_box/sing-box
+          export SINGBOX="$PWD/test-root/opt/v2rayN/bin/sing_box/sing-box"
+          export V2RAYN_APP_DIR="$PWD/test-root/opt/v2rayN"
+          mkdir -p tests/bin
+          cp probe-out/ClientProbe tests/bin/ClientProbe
+          echo "Running 8-case verification test..."
+          bash tests/run.sh
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.release_tag }}
+          name: "v2rayN ${{ steps.vars.outputs.full_ver }}"
+          body: |
+            ## v2rayN ${{ steps.vars.outputs.full_ver }}
+            
+            基于上游 `2dust/v2rayN` 官方版本 `${{ steps.vars.outputs.tag }}` 构建，集成 TLS Pin 补丁。
+            
+            ### 特性说明
+            - 针对 Hysteria2 / TUIC 自签证书节点，将 `pinSHA256` 映射为 sing-box 的 `certificate_public_key_sha256`。
+            - 零 PEM 证书导入，保持严格的公钥指纹真实校验。
+            - 包含官方同款内核与完整桌面集成，安装后 `dpkg --verify` 校验通过。
+            - 附带预编译的独立验收工具 `ClientProbe`，本地验收无需安装 .NET SDK。
+            
+            ### SHA256 校验
+            ```
+            $(cat sha256sums.txt)
+            ```
+          files: |
+            v2rayn_${{ steps.vars.outputs.full_ver }}_amd64.deb
+            client-probe-linux-x64.tar.gz
+            sha256sums.txt
+          draft: false
+          prerelease: false
