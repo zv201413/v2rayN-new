@@ -1,0 +1,48 @@
+name: Auto Follow Upstream Releases
+
+on:
+  schedule:
+    # 每天 UTC 0点、6点、12点、18点检查一次
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check latest upstream release vs current repository releases
+        id: check_version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "▸ Checking latest release from 2dust/v2rayN..."
+          UPSTREAM_TAG=$(gh api repos/2dust/v2rayN/releases/latest --jq '.tag_name')
+          echo "Upstream latest tag: ${UPSTREAM_TAG}"
+          
+          BASE_TAG="${UPSTREAM_TAG#v}"
+          EXPECTED_RELEASE="v${BASE_TAG}+zvpin1"
+          echo "Expected patched release tag: ${EXPECTED_RELEASE}"
+          
+          EXISTS=$(gh api "repos/${{ github.repository }}/releases/tags/${EXPECTED_RELEASE}" --jq '.tag_name' 2>/dev/null || true)
+          if [ -n "$EXISTS" ]; then
+            echo "Release ${EXPECTED_RELEASE} already exists in ${{ github.repository }}. Nothing to do."
+            echo "need_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "New upstream release detected! Will trigger build for ${BASE_TAG}."
+            echo "need_build=true" >> $GITHUB_OUTPUT
+            echo "tag=${BASE_TAG}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Trigger build workflow
+        if: steps.check_version.outputs.need_build == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.check_version.outputs.tag }}"
+          echo "Triggering build.yml for tag: ${TAG}..."
+          gh workflow run build.yml -f upstream_tag="${TAG}" -f patch_rev="+zvpin1"
+          echo "Build workflow triggered successfully."
