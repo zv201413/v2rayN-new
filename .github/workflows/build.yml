@@ -8,9 +8,9 @@ on:
         required: true
         default: '7.25.6'
       patch_rev:
-        description: 'Patch revision suffix (e.g. +zvpin1)'
+        description: 'Patch revision suffix (e.g. +zvpin2)'
         required: true
-        default: '+zvpin1'
+        default: '+zvpin2'
   push:
     tags:
       - 'v*'
@@ -37,7 +37,7 @@ jobs:
             if [[ "$RAW_TAG" == *+* ]]; then
               REV="+${RAW_TAG#*+}"
             else
-              REV="+zvpin1"
+              REV="+zvpin2"
             fi
           fi
           FULL_VER="${TAG}${REV}"
@@ -61,6 +61,7 @@ jobs:
 
       - name: Apply TLS pin patch
         run: |
+          python3 tests/test_apply_pin.py
           echo "Applying TLS pin patch..."
           python3 patches/apply-pin.py upstream-src/v2rayN
           echo "Verifying patch marker in ServiceLib..."
@@ -117,7 +118,7 @@ jobs:
           export V2RAYN_APP_DIR="$PWD/test-root/opt/v2rayN"
           mkdir -p tests/bin
           cp probe-out/ClientProbe tests/bin/ClientProbe
-          echo "Running 8-case verification test..."
+          echo "Running 9-case verification test..."
           bash tests/run.sh
 
       - name: Create GitHub Release
@@ -132,14 +133,14 @@ jobs:
             
             ### 特性说明
             - 针对 Hysteria2 / TUIC 自签证书节点，将 `pinSHA256` 映射为 sing-box 的 `certificate_public_key_sha256`。
-            - 零 PEM 证书导入，保持严格的公钥指纹真实校验。
+            - 有效 base64 SPKI pin 真校验；hex 旧链接保留 insecure 回退，不再输出无效公钥 pin。
+            - Hy2 请将核心映射设为 sing_box；有效 pin 导入不再自动勾选跳过验证。
+            - 通过真实 DLL 导入/生成验证及 9 项 sing-box 连通测试。
             - 包含官方同款内核与完整桌面集成，安装后 `dpkg --verify` 校验通过。
             - 附带预编译的独立验收工具 `ClientProbe`，本地验收无需安装 .NET SDK。
             
             ### SHA256 校验
-            ```
-            $(cat sha256sums.txt)
-            ```
+            下载附件 `sha256sums.txt`，在产物目录执行 `sha256sum -c sha256sums.txt`。
           files: |
             v2rayn_${{ steps.vars.outputs.full_ver }}_amd64.deb
             client-probe-linux-x64.tar.gz

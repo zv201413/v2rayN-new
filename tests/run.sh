@@ -82,6 +82,7 @@ EOF
 mk_hy2 c_pin.json      1081 "\"insecure\": false, \"certificate_public_key_sha256\": [\"$PIN\"]"
 mk_hy2 c_nopin.json    1082 "\"insecure\": false"
 mk_hy2 c_wrongpin.json 1083 "\"insecure\": false, \"certificate_public_key_sha256\": [\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"]"
+mk_hy2 c_hexpin.json   1088 "\"insecure\": true"
 mk_hy2 c_insec.json    1085 "\"insecure\": true"
 mk_hy2 c_deadport.json 1086 "\"insecure\": true" 24499
 mk_tuic t_pin.json     1084 "\"insecure\": false, \"certificate_public_key_sha256\": [\"$PIN\"]"
@@ -119,6 +120,7 @@ run_case hy2_wrongpin c_wrongpin.json 1083 fail
 run_case tuic_pin     t_pin.json      1084 pass
 run_case tuic_nopin   t_nopin.json    1087 fail
 run_case tuic_wrongpin t_wrongpin.json 1089 fail
+run_case hy2_hexpin   c_hexpin.json   1088 pass
 run_case hy2_insec    c_insec.json    1085 pass
 run_case hy2_deadport c_deadport.json 1086 fail
 

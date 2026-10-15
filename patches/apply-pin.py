@@ -3,15 +3,16 @@
 
 用法：python3 apply-pin.py <v2rayN 源码根目录>
 
-三处改动（全在 ServiceLib）：
+四处改动（全在 ServiceLib）：
   1. Models/CoreConfigs/SingboxConfig.cs        —— Tls4Sbox 增 certificate_public_key_sha256
   2. Services/CoreConfig/Singbox/SingboxOutboundService.cs
                                                 —— FillOutboundTls：CertSha → pin，且与 PEM 二选一
   3. Handler/Fmt/TuicFmt.cs                     —— Resolve：解析 pinSHA256 写入 CertSha
+  4. Handler/Fmt/Hysteria2Fmt.cs                —— 有效 SPKI pin 不自动开启 insecure
 
 设计要点：
   - 只做「插入/替换固定锚点片段」，不做模糊匹配；找不到锚点 = 上游结构变了 = 立即失败
-  - 幂等：已有目标内容（含标记串 certificate_public_key_sha256）则跳过该处
+  - 幂等：T2/T4 按完整片段判定；T2 支持从 zvpin1 原位升级
   - 退出码：0 全部就位（含已就位）；1 任一锚点失败
 """
 
@@ -49,7 +50,7 @@ T2_OLD = """                var certs = CertPemManager.ParsePemChain(_node.Cert)
                     tls.certificate = certs;
                     tls.insecure = false;
                 }"""
-T2_NEW = """                var certs = CertPemManager.ParsePemChain(_node.Cert);
+T2_V1 = """                var certs = CertPemManager.ParsePemChain(_node.Cert);
                 if (certs.Count > 0)
                 {
                     tls.certificate = certs;
@@ -65,16 +66,45 @@ T2_NEW = """                var certs = CertPemManager.ParsePemChain(_node.Cert)
                     tls.certificate_public_key_sha256 = [_node.CertSha.TrimEx()];
                     tls.insecure = false;
                 }"""
+T2_NEW = """                var certs = CertPemManager.ParsePemChain(_node.Cert);
+                if (certs.Count > 0)
+                {
+                    tls.certificate = certs;
+                    tls.insecure = false;
+                }
+                else if (!_node.CertSha.IsNullOrEmpty() && !_node.CertSha.Contains(','))
+                {
+                    // zv pin 补丁：CertSha → certificate_public_key_sha256。
+                    // 仅接受 base64 解出 32 字节的公钥 SPKI 指纹；v2rayN 自产的 64 位 hex
+                    // （整证书 DER 指纹，Xray 系格式）等其它格式一律不当作 pin，退回 insecure 语义，
+                    // 避免 sing-box 把 hex 按 base64 解出垃圾导致握手硬失败。
+                    var sha = _node.CertSha.TrimEx();
+                    try
+                    {
+                        var raw = Convert.FromBase64String(sha.PadRight((sha.Length + 3) / 4 * 4, '='));
+                        if (raw.Length == 32)
+                        {
+                            tls.certificate_public_key_sha256 = [Convert.ToBase64String(raw)];
+                            tls.insecure = false;
+                        }
+                    }
+                    catch (FormatException)
+                    {
+                    }
+                }"""
 
 
 def patch_outbound(root: Path) -> str:
     path = root / T2_REL
     text = path.read_text(encoding="utf-8")
-    if MARKER in text:
+    if text.count(T2_NEW) == 1:
         return "ALREADY"
-    if T2_OLD not in text:
-        return "FAILED: FillOutboundTls 的证书分支锚点片段缺失（上游可能改了这段）"
-    text = text.replace(T2_OLD, T2_NEW, 1)
+    if text.count(T2_V1) == 1:
+        text = text.replace(T2_V1, T2_NEW, 1)
+    elif MARKER not in text and text.count(T2_OLD) == 1:
+        text = text.replace(T2_OLD, T2_NEW, 1)
+    else:
+        return "FAILED: FillOutboundTls 锚点缺失或非已知补丁版本（停止，勿仅凭标记跳过）"
     path.write_text(text, encoding="utf-8")
     return "APPLIED"
 
@@ -107,6 +137,51 @@ def patch_tuic(root: Path) -> str:
     return "APPLIED"
 
 
+# ------------------------------------ 改动 4：Hy2 有效公钥 pin 不自动开启 insecure
+
+T4_REL = "ServiceLib/Handler/Fmt/Hysteria2Fmt.cs"
+T4_OLD = """            if (!pinSHA256.IsNullOrEmpty())
+            {
+                // NOTE:
+                // To accommodate Xray changes,
+                // some providers issue self-signed cert links with `insecure = false` and a certificate fingerprint,
+                // breaking interoperability between Xray, official Hysteria 2 client, and sing-box.
+                // Since this won't compromise the overall security model,
+                // `insecure = true` is automatically set when a fingerprint is detected,
+                // and the value is restored when generating configurations.
+                item.AllowInsecure = Global.StringTrue;
+            }"""
+T4_NEW = """            if (!pinSHA256.IsNullOrEmpty())
+            {
+                // zv pin 补丁：有效 SPKI pin 不自动勾选跳过验证；显式 insecure 参数仍保留。
+                // 非公钥 pin 保留上游回退语义，使 hex 旧链接切到 sing-box 后仍可连接。
+                var sha = pinSHA256.TrimEx();
+                var isPublicKeyPin = false;
+                try
+                {
+                    isPublicKeyPin = Convert.FromBase64String(sha.PadRight((sha.Length + 3) / 4 * 4, '=')).Length == 32;
+                }
+                catch (FormatException)
+                {
+                }
+                if (!isPublicKeyPin)
+                {
+                    item.AllowInsecure = Global.StringTrue;
+                }
+            }"""
+
+
+def patch_hy2(root: Path) -> str:
+    path = root / T4_REL
+    text = path.read_text(encoding="utf-8")
+    if text.count(T4_NEW) == 1:
+        return "ALREADY"
+    if text.count(T4_OLD) != 1:
+        return "FAILED: Hysteria2Fmt.ResolveHy2UriQuery 的 pinSHA256 锚点缺失"
+    path.write_text(text.replace(T4_OLD, T4_NEW, 1), encoding="utf-8")
+    return "APPLIED"
+
+
 def main():
     if len(sys.argv) < 2:
         print("用法: apply-pin.py <v2rayN 源码根目录>", file=sys.stderr)
@@ -120,6 +195,7 @@ def main():
         "1_model": patch_model(root),
         "2_outbound": patch_outbound(root),
         "3_tuic": patch_tuic(root),
+        "4_hy2": patch_hy2(root),
     }
 
     ok = True

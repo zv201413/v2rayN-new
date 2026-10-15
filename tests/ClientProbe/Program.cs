@@ -45,7 +45,10 @@ static class Probe
         {
             var node = await Import(protocol, certPin, config);
             node.Port = remotePort;
-            if (insecure) node.AllowInsecure = "true";
+            if (protocol == "hy2" && certPin.Length > 0)
+                Check(!node.GetAllowInsecure(), file + " public-key pin does not auto-enable insecure");
+            // Exercise generation with explicit insecure even though pin imports no longer set it.
+            if (insecure || certPin.Length > 0) node.AllowInsecure = "true";
             Check(string.IsNullOrEmpty(node.Cert), file + " no PEM");
             var outbound = Generate(config, node);
             var tls = outbound["tls"]!.AsObject();
@@ -64,6 +67,40 @@ static class Probe
                 ["outbounds"] = new JsonArray(outbound)
             };
             File.WriteAllText(Path.Combine(work, file), json.ToJsonString());
+        }
+        // Legacy certificate DER hashes are not SPKI hashes; preserve Hy2's insecure fallback.
+        const string hexPin = "00224430D875DE6AC295A11E06F9B24956A5885B35CCD3398695DC96C7F81F4C";
+        var hexNode = await Import("hy2", hexPin, config);
+        Check(hexNode.CertSha == hexPin && hexNode.GetAllowInsecure(), "hex import retains legacy fallback");
+        Check(string.IsNullOrEmpty(hexNode.Cert), "hex import has no PEM");
+        var hexOutbound = Generate(config, hexNode);
+        var hexTls = hexOutbound["tls"]!;
+        Check(hexTls["certificate_public_key_sha256"] == null && hexTls["insecure"]!.GetValue<bool>(),
+              "hex is omitted from public-key pin and insecure fallback is preserved");
+        File.WriteAllText(Path.Combine(work, "c_hexpin.json"), new JsonObject {
+            ["log"] = new JsonObject { ["level"] = "warn" },
+            ["inbounds"] = new JsonArray(new JsonObject {
+                ["type"] = "socks", ["listen"] = "127.0.0.1", ["listen_port"] = 1088 }),
+            ["outbounds"] = new JsonArray(hexOutbound)
+        }.ToJsonString());
+
+        foreach (var protocol in new[] { "hy2", "tuic" })
+        {
+            foreach (var candidate in new[] { pin.TrimEnd('='), "  " + pin + "  " })
+            {
+                var node = await Import(protocol, candidate, config);
+                var tls = Generate(config, node)["tls"]!;
+                Check(tls["certificate_public_key_sha256"]?[0]?.GetValue<string>() == pin
+                      && !tls["insecure"]!.GetValue<bool>(), protocol + " canonical base64 output");
+            }
+            foreach (var invalid in new[] { hexPin, "!invalid!", new string('A', 40), pin + "," + pin })
+            {
+                var node = await Import(protocol, invalid, config);
+                node.AllowInsecure = "false";
+                var tls = Generate(config, node)["tls"]!;
+                Check(tls["certificate_public_key_sha256"] == null && !tls["insecure"]!.GetValue<bool>(),
+                      protocol + " invalid pin neither emitted nor weakens explicit verification");
+            }
         }
         var pemNode = await Import("hy2", pin, config);
         pemNode.Cert = File.ReadAllText(Path.Combine(work, "pki/cert.crt"));

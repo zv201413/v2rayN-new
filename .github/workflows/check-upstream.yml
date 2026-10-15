@@ -24,7 +24,7 @@ jobs:
           echo "Upstream latest tag: ${UPSTREAM_TAG}"
           
           BASE_TAG="${UPSTREAM_TAG#v}"
-          EXPECTED_RELEASE="v${BASE_TAG}+zvpin1"
+          EXPECTED_RELEASE="v${BASE_TAG}+zvpin2"
           echo "Expected patched release tag: ${EXPECTED_RELEASE}"
           
           EXISTS=$(gh api "repos/${{ github.repository }}/releases/tags/${EXPECTED_RELEASE}" --jq '.tag_name' 2>/dev/null || true)
@@ -44,5 +44,5 @@ jobs:
         run: |
           TAG="${{ steps.check_version.outputs.tag }}"
           echo "Triggering build.yml for tag: ${TAG}..."
-          gh workflow run build.yml -f upstream_tag="${TAG}" -f patch_rev="+zvpin1"
+          gh workflow run build.yml -f upstream_tag="${TAG}" -f patch_rev="+zvpin2"
           echo "Build workflow triggered successfully."
